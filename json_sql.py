@@ -1,34 +1,116 @@
-import json
-import time
+import ijson
+from decimal import Decimal
+import mysql.connector
+import os
 
-start_time = time.time()
+
+config = {
+    "host": "127.0.0.1",
+    "port": 3307,
+    "user": os.environ.get("MYSQL_USER"),
+    "password": os.environ.get("MYSQL_PASSWORD"),
+    "database": os.environ.get("MYSQL_DATABASE"),
+}
+
 
 try:
-    print("Opening JSON file...")
-    with open('etl_process_backup.json', 'r', encoding='utf-8') as f:
-        data = json.load(f)
-    print("JSON file successfully loaded.")
-
-    table_count = len(data)
-    print(f"Total tables found: {table_count}")
-
-    with open("data_parser.sql", "w", encoding='utf-8') as f:
-        for table_index, (table_name, rows) in enumerate(data.items(), start=1):
-            if isinstance(rows, list) and rows:
-                print(f"[{table_index}/{table_count}] Processing table '{table_name}' with {len(rows)} rows...")
-
-                columns = rows[0].keys()
-                f.write(f"CREATE TABLE {table_name} ({', '.join(f'{col}' for col in columns)});\n")
-
-                for row_index, row in enumerate(rows, start=1):
-                    values = "', '".join(str(row.get(col, '')) for col in columns)
-                    f.write(f"INSERT INTO {table_name} VALUES ('{values}');\n")
-
-                    if row_index % 1000 == 0:
-                        print(f"  --> {row_index} rows written for '{table_name}'")
-
-    print("✅ SQL file 'data_parser.sql' has been successfully created.")
-    print(f"⏱️ Total time taken: {round(time.time() - start_time, 2)} seconds")
-
+     print("Connection to Mysql DB")
+     conn = mysql.connector.connect(**config)
+     cursor = conn.cursor()
+     print("Connected Successfully")
 except Exception as e:
-    print("❌ An error occurred:", str(e))
+     print(f"Error: {e}")
+
+
+file_path  = "etl_process_backup.json"
+
+with open(file_path, "rb") as f:
+    parser = ijson.parse(f)
+    table_names = set()
+
+    for prefix, event, value in parser:
+        if prefix == '' and event == 'map_key':
+            table_names.add(value)
+
+
+def get_rows(file_path, key, n=None):
+        rows = []
+        with open(file_path, "rb") as f:
+            items = ijson.items(f, f'{key}.item')
+            if n is None:
+                 for item in items:
+                      rows.append(item)
+            else:
+                 for i, item in enumerate(items):
+                      if i >= n :
+                           break
+                      rows.append(item)   
+
+        return rows  
+
+  
+def infer_sql_schema(table_name, rows):
+        cols = {}
+        for row in rows:
+            for k, v in row.items():
+                if k not in cols:
+                    if isinstance(v, int):
+                        cols[k] = 'INT'
+                    elif isinstance(v, float):
+                        cols[k] = 'FLOAT'
+                    elif isinstance(v, bool):
+                        cols[k] = 'BOOLEAN'
+                    elif isinstance(v, str) and len(v) > 255:
+                        cols[k] = 'TEXT'
+                    elif isinstance(v, Decimal):    
+                        cols[k] = 'DECIMAL(15, 5)'
+                    else:
+                        cols[k] = 'VARCHAR(225)'
+
+        columns_sql = ',\n '.join([f"`{k}` {v}" for k, v in cols.items()])
+        return f"CREATE TABLE `{table_name}`(\n {columns_sql}\n);"
+
+
+def stream_insert_data(table_name, rows):
+     cols = rows[0].keys()
+     placeholders = ', '.join(['%s'] * len(cols))
+     insert_query = f"INSERT INTO `{table_name}`({', '.join(cols)}) VALUES ({placeholders})"
+     for row in rows:
+          values = [row.get(col) for col in cols]
+          try:
+               cursor.execute(insert_query, values)
+          except Exception as e:
+               print(f"Error inserting data into {table_name}: {e}")
+     conn.commit()
+
+for table_name in table_names:
+     print(f"Processing: {table_name}")
+     sample = get_rows(file_path, table_name, 1)
+     sql_schema = infer_sql_schema(table_name, sample)
+     print("SQL Schema:")
+     print(sql_schema)
+     print("\n")
+     cursor.execute(f"DROP TABLE IF EXISTS `{table_name}`")
+     cursor.execute(sql_schema)
+     rows = get_rows(file_path, table_name)
+     stream_insert_data(table_name, rows)
+          
+
+        
+cursor.close()
+conn.close()
+
+
+
+    
+
+"""parser = ijson.parse(f)
+    for prefix, event, value in parser:
+        if prefix == '' and event == 'map_key':
+            print('Top level key:', value)
+
+    caism = ijson.items(f, 'caism2mgw_s01_a2025.item')
+    for i, each in enumerate(caism):
+        print(each)  
+        if i >= 4:
+            break"""
